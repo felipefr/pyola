@@ -26,195 +26,237 @@ import copy
 
 # @njit
 
-def get_truss_kinematics(X, u):
-    Bmat = np.array([[-1,0,1,0], [0,-1,0,1]]) # Delta operation
-    a = Bmat@X
-    L0 = np.linalg.norm(a) # underformed length
-    a = a/L0 # unitary underformed truss vector 
-    Bmat = Bmat/L0 # discrete gradient operator
-    
-    q = a + Bmat@u # deformed truss vector (stretch lenght)  
-    lmbda = np.linalg.norm(q) # L/L0
-    b = q/lmbda # unitary deformed truss vector  
-    
-    return a, b, lmbda, L0, Bmat
 
-def truss_element_stiffness_force(X, u, uold, param, component='truss'):
-    # A, E, eta = param['A'], param['E'], param['eta'] 
-    A, E = param['A'], param['E']
-    
-    a, b, lmbda, L0, Bmat = get_truss_kinematics(X, u)
-    
-    # green-lagrange nonlinear truss
-    # psi = 0.5*E*[strain(lambda)]**2, stress = dpsi/dlambda, dtang=d2psi/d2lambda
-    # strain = 0.5*(lmbda**2 - 1)
-    # stress = E * strain * lmbda
-    # dtang = 0.5*E*(3*lmbda**2-1)
-    
-    print(lmbda, E)
-    
-    if(component=='truss'):
-        strain = lmbda - 1
-        stress = E * strain 
-        dtang = E
-    elif(component == 'cable'):
-        lmbda_old = np.linalg.norm(a + Bmat@uold) # L/L0
-    
-        strain = lmbda - 1
-        stress = E * strain if lmbda>1.0 else 0.0
-        dtang = E if lmbda>1.0 else 0.0
+
+class Mesh:
+    def __init__(self, X, cells, param=None):
+        self.X = X
+        self.cells = cells
+        self.param = param
+        self.n_cells = len(self.cells)
+        self.n_nodes = len(self.X)
+        self.ndim = self.X.shape[1]
+        self.bnd_nodes = []
         
-        # stress = stress + eta*(lmbda - lmbda_old)
-        # dtang = dtang + eta
+    def mark_boundary_nodes(self, tol = 1e-10):
+        x_min, y_min = self.X.min(axis=0)
+        x_max, y_max = self.X.max(axis=0)
+        
+        self.bnd_nodes = []
+        
+        for i, x in enumerate(self.X):
+            if(np.abs(x[0]-x_min)<tol or 
+               np.abs(x[1]-y_min)<tol or 
+               np.abs(x[0]-x_max)<tol or
+               np.abs(x[1]-y_max)<tol):
+                  
+                  self.bnd_nodes.append(i)
+
+        self.bnd_nodes = np.array(self.bnd_nodes, dtype = 'int')
+        return self.bnd_nodes
 
 
-    V = L0*A  # Volume
 
-    # Internal force vector (2D)
-    f_int = V * stress * (Bmat.T @ b)
-    D_mat = dtang * np.outer(b,b) 
-    D_geo = stress*(np.eye(2) - np.outer(b,b))/lmbda
+class TrussElement:
+    def __init__(self):
+        self.n_dofs = 2
+        self.B_matrix = np.array([[-1,0,1,0], [0,-1,0,1]])
+        
+    def get_truss_kinematics(self, X, u, uold):
+        a = self.B_matrix@X
+        L0 = np.linalg.norm(a) # underformed length
+        a = a/L0 # unitary underformed truss vector 
+        Bmat = self.B_matrix/L0 # discrete gradient operator
+        
+        q = a + Bmat@u # deformed truss vector (stretch lenght)  
+        lmbda = np.linalg.norm(q) # L/L0
+        b = q/lmbda # unitary deformed truss vector  
+        
+        lmbda_old = np.linalg.norm(a + self.B_matrix@uold) 
+        
+        return a, b, lmbda, lmbda_old, L0, Bmat
 
-    # Tangent stiffness matrix (4x4)
-    K = V * Bmat.T@(D_mat + D_geo)@Bmat
-    
-    return K, f_int
+class FunctionSpace:
+    def __init__(self, mesh, element):
+        self.mesh = mesh
+        self.element = element
+        self.n_dofs = element.n_dofs * mesh.n_nodes
 
-
-def truss_element_canonical_problem(X, u, param, component='truss'):
-    A, E, k, l = param['A'], param['E'], param['k'], param['l'] 
-    a, b, lmbda, L0, Bmat = get_truss_kinematics(X, u)
-    
-    # green-lagrange nonlinear truss
-    # psi = 0.5*E*[strain(lambda)]**2, stress = dpsi/dlambda, dtang=d2psi/d2lambda
-    # strain = 0.5*(lmbda**2 - 1)
-    # stress = E * strain * lmbda
-    # dtang = 0.5*E*(3*lmbda**2-1)
-    
-    if(component=='truss'):
-        strain = lmbda - 1
-        stress = E * strain 
-        dtang = E
-    elif(component == 'cable'):
-        strain = lmbda - 1
-        stress = E * strain if lmbda>1.0 else 0.0
-        dtang = E if lmbda>1.0 else 0.0
-
-
-    V = L0*A  # Volume
-
-    D = dtang * np.outer(b,b) # material 
-    D += stress*(np.eye(2) - np.outer(b,b))/lmbda # geometric
-    
-    f_int = -V * a[l] * (Bmat.T @ D[:,k] )
-    K = V * Bmat.T @ D @ Bmat
-    
-    return K, f_int
-
-
-# ----------------------------------------
-# Global Assembly
-# ----------------------------------------
-
-# @njit
-def assemble_global(mesh, u, uold, component, param = [], func = truss_element_stiffness_force):
-    ndofs = len(u)
-    data = []
-    rows = []
-    cols = []
-    F_int = np.zeros(ndofs)
-
-    param = {}
-    for e in range(mesh.cells.shape[0]):
-        n1, n2 = mesh.cells[e]
+    def get_dofs_for_cell(self, c):
+        n1, n2 = self.mesh.cells[c]
         dofs = np.array([2*n1, 2*n1+1, 2*n2, 2*n2+1])
-        
-        XL = mesh.X.flatten()[dofs]
-        uL = u[dofs]
-        uoldL = uold[dofs]
-        
-        param['A'] = mesh.param['A'][e] 
-        param['E'] = mesh.param['E'][e]
-        # param['eta'] =mesh.param['eta'][e]
-        
-        Ke, fe = func(XL, uL, uoldL, param, component)
+        return dofs
 
-        F_int[dofs] += fe
+class Function:
+    def __init__(self, V):
+        self.functionspace = V
+        self.array = np.zeros(V.n_dofs)
 
-        grid = np.meshgrid(dofs, dofs) # x first, y second, in row-wise order
-        rows += list(grid[1].flatten()) # i runs in y
-        cols += list(grid[0].flatten()) # j runs in x
-        data += list(Ke.flatten())
+class LinearEngStrainTrussMaterial:
+    def __init__(self, E):
+        self.E = E
         
-    K_global = sp.coo_matrix((data, (rows, cols)), shape=(ndofs, ndofs)).tocsr()
-    return K_global, F_int
+    def __call__(self, lmbda, lmbda_old):
+        strain = lmbda - 1
+        stress = self.E * strain 
+        dtang = self.E
+        return stress, dtang
 
-# ----------------------------------------
-# Apply boundary conditions
-# ----------------------------------------
 
-def apply_boundary_conditions(K, F, fixed_dofs, u_fixed):
-    all_dofs = np.arange(K.shape[0])
-    free_dofs = np.setdiff1d(all_dofs, fixed_dofs)
+class LinearEngStrainCableMaterial:
+    def __init__(self, E, eta = 0.0):
+        self.E = E
+        self.eta = eta
+        
+    def __call__(self, lmbda, lmbda_old):
+        strain = lmbda - 1
+        stress = self.E * strain if strain > 0.0 else 0.0 
+        dtang = self.E if strain > 0.0 else 0.0
+        
+        stress = stress + self.eta*(lmbda - lmbda_old)
+        dtang = dtang + lmbda_old
+        return stress, dtang
+
     
-    F_mod = F[free_dofs] - K[free_dofs][:,fixed_dofs].toarray()@u_fixed
+class TrussLocalIntegrator:
+    def __init__(self, A, material, V):
+        self.A = A
+        self.material = material
+        self.element = V.element
+        self.V = V
+        
+    def compute(self, X, u, uold, e):
+        A = self.A[e]
+        a, b, lmbda, lmbda_old, L0, Bmat = self.element.get_truss_kinematics(X, u, uold)
+        
+        stress, dtang = self.material(lmbda, lmbda_old)
+        
+        V = L0*A  # Volume
 
-    return K[free_dofs][:, free_dofs], F_mod, free_dofs
+        # Internal force vector (2D)
+        f_int = V * stress * (Bmat.T @ b)
+        D_mat = dtang * np.outer(b,b) 
+        D_geo = stress*(np.eye(2) - np.outer(b,b))/lmbda
+
+        # Tangent stiffness matrix (4x4)
+        K = V * Bmat.T@(D_mat + D_geo)@Bmat
+        
+        return K, f_int
+    
+    
+class DOFHandler:
+    def __init__(self, mesh):
+        self.mesh = mesh
+        self.function_spaces = []
+        self.offsets = []
+        self.total_dofs = 0
+
+    def add_space(self, space, name=None):
+        self.offsets.append(self.total_dofs)
+        self.function_spaces.append((name, space))
+        self.total_dofs += space.n_dofs
+
+    def finalize(self):
+        pass
+
+    def get_cell_dofs(self, cell_id):
+        dofs = []
+        for name, fs in self.function_spaces:
+            local = fs.get_dofs_for_cell(cell_id)
+            global_dofs = self.offsets[self.function_spaces.index((name, fs))] + local
+            dofs.append(global_dofs)
+        return dofs
+    
+class Assembler:
+    def __init__(self, mesh, dof_handler):
+        self.mesh = mesh
+        self.dh = dof_handler
+        self.ndofs = self.dh.total_dofs
+
+    def assemble(self, integrator, u, uold = None):
+        rows, cols, data = [], [], []
+        F = np.zeros(self.ndofs)
+    
+        for c in range(self.mesh.n_cells):
+            X = self.mesh.X[self.mesh.cells[c]]
+            cell_dofs = self.dh.get_cell_dofs(c)[0] # only for the first space (U)
+            Ke, fe = integrator.compute(X.flatten(), u.array[cell_dofs], uold.array[cell_dofs], c)
+            F[cell_dofs]+= fe
+            for i, gi in enumerate(cell_dofs):
+                for j, gj in enumerate(cell_dofs):
+                    rows.append(gi)
+                    cols.append(gj)
+                    data.append(Ke[i, j])
+                    
+        K = sp.coo_matrix((data, (rows, cols)), shape=(self.ndofs, self.ndofs)).tolil()
+        return K, F
+
+class DirichletBC:
+    def __init__(self, nodes, ldofs, value):
+        self.nodes = nodes 
+        self.ldofs = ldofs
+        self.value = value
+        self.n_ldofs = len(ldofs)
+        self.dofmap = np.array([ [i*self.n_ldofs + j for j in self.ldofs] for i in self.nodes]).flatten()
+
+    def apply(self, A, b):
+        A[self.dofmap,:] = 0.0
+        A[self.dofmap,self.dofmap] = 1.0
+        b[self.dofmap] = self.value.flatten()       
+
+    def homogenise(self):
+        return DirichletBC(self.node, self.ldof, np.zeros_like(self.value))
+
+
+# ----------------------------------------
+# Linear Solver
+# ----------------------------------------
+def solve_linear(mesh, U, dh, form, forces, bcs):
+
+    ass = Assembler(mesh, dh)
+    
+    u0 = Function(U)
+    K, F = ass.assemble(form, u0, u0) # u0 is dummy
+    F+=forces
+    for bc in bcs: 
+        bc.apply(K,F)
+    
+    K = K.tocsr()
+    u = spla.spsolve(K, F)
+    
+    return u
+
 
 # ----------------------------------------
 # Newton-Raphson Solver
 # ----------------------------------------
-
-def solve_nonlinear(mesh, forces, fixed_dofs, u_fixed, u0 = None, tol=1e-10, max_iter=50, component='truss'):
-    nnodes = mesh.X.shape[0]
-    ndofs = 2 * nnodes
-    u = u0 if type(u0)==type(None) else np.zeros(ndofs)
-    uold = copy.deepcopy(u0) if type(u0)==type(None) else np.zeros(ndofs)
+def solve_nonlinear(mesh, U, dh, form, forces, bcs, uold, tol=1e-13, max_iter=50):
+    u = Function(U)
+    u.array[:] = uold.array[:]
     
-    zero_u_fixed = np.zeros_like(u_fixed)
-    du = np.zeros_like(u)
-    
+    ass = Assembler(mesh, dh)
     
     for k in range(max_iter):
-        K, F_int = assemble_global(mesh, u, uold, component)
-        R = forces - F_int
+        K, F_int = ass.assemble(form, u, uold)
+        b = forces - F_int + K@u.array[:]
         
-        # check it
-        du_fixed = (u_fixed - u[fixed_dofs]) if k==0 else zero_u_fixed  
+        for bc in bcs:
+            bc.apply(K,b)
         
-        # du_fixed = u_fixed if k==0 else zero_u_fixed
-        K_mod, R_mod, free_dofs = apply_boundary_conditions(K, R, fixed_dofs, du_fixed)
-        
-        du[free_dofs] = spla.spsolve(K_mod, R_mod)
-        du[fixed_dofs] = du_fixed
-        
-        uold[:] = u[:]
-        u += du
+        K = K.tocsr()
+        b = np.array(b).astype(np.float64)
 
-        norm_res = np.linalg.norm(R_mod)
-        print(f"Iter {k:2d}: Residual = {norm_res:.3e}")
-        if norm_res < tol:
+        uold.array[:] = u.array[:] 
+        u.array[:] = spla.spsolve(K, b)
+        norm_du = np.linalg.norm(u.array - uold.array)/np.linalg.norm(u.array)
+        # norm_res = np.linalg.norm(forces-F_int)        
+
+        print(f"Iter {k:2d}: increment = {norm_du:.3e}")
+        if norm_du < tol:
             break
         
     return u
 
-def solve_linear(mesh, forces, fixed_dofs, u_fixed, component='truss'):
-    nnodes = mesh.X.shape[0]
-    ndofs = 2 * nnodes
-    u = np.zeros(ndofs)
-    udummy = np.zeros(ndofs)
-    
-    K, F = assemble_global(mesh, u, udummy, component, func = truss_element_canonical_problem) # None pour u_old
-    F += forces
-    
-    # du_fixed = u_fixed if k==0 else zero_u_fixed
-    K_mod, F_mod, free_dofs = apply_boundary_conditions(K, F, fixed_dofs, u_fixed)
-    
-    u[free_dofs] = spla.spsolve(K_mod, F_mod)
-    u[fixed_dofs] = u_fixed
-    
-    
-    return u
 
 
 
@@ -260,31 +302,6 @@ def plot_truss(mesh, u, scale=1.0, show_nodes=True):
 
 
 
-class Mesh:
-    def __init__(self, X, cells, param=None):
-        self.X = X
-        self.cells = cells
-        self.param = param
-        self.ndim = self.X.shape[1]
-        self.bnd_nodes = []
-        
-    def mark_boundary_nodes(self, tol = 1e-10):
-        x_min, y_min = self.X.min(axis=0)
-        x_max, y_max = self.X.max(axis=0)
-        
-        self.bnd_nodes = []
-        
-        for i, x in enumerate(self.X):
-            if(np.abs(x[0]-x_min)<tol or 
-               np.abs(x[1]-y_min)<tol or 
-               np.abs(x[0]-x_max)<tol or
-               np.abs(x[1]-y_max)<tol):
-                  
-                  self.bnd_nodes.append(i)
-
-        self.bnd_nodes = np.array(self.bnd_nodes, dtype = 'int')
-        return self.bnd_nodes
-
         
 
 if __name__ == "__main__":
@@ -301,22 +318,27 @@ if __name__ == "__main__":
         [0, 1],
     ])
     
+    mesh = Mesh(coords, elements)
+
+    mat = LinearEngStrainTrussMaterial(E=210e9)
+
+    U = FunctionSpace(mesh, TrussElement())
+    dh = DOFHandler(mesh)
+    dh.add_space(U, name = 'displacement')
+    
     A = np.array([1e-4, 1e-4, 1e-4])
-    E = np.array([210e9, 210e9, 210e9])
+    
+    form = TrussLocalIntegrator(A, mat, U)
+    
+    bcs = [DirichletBC([0,1], [0,1], np.array([[0.0,0.0],[0.01,0.0]])) ]
 
-    mesh = Mesh(coords, elements, param = {'E': E, 'A': A})
-
-    ndofs = 2 * coords.shape[0]
-    forces = np.zeros(ndofs)
+    forces = np.zeros(U.n_dofs)
     forces[5] = -1e6  # Load at node 2, y-direction
-
-    fixed_dofs = np.array([0, 1, 2, 3])  # Node 0 and 1 fixed
-    u_fixed = np.array( [0.0, 0.0, 0.01, 0.0] )
+   
+    u = solve_linear(mesh, U, dh, form, forces, bcs)
     
-    u0 = np.zeros_like(forces)
-    u = solve_nonlinear(mesh, forces, fixed_dofs, u_fixed, u0 = u0)
-
-    print("\nDisplacements:")
-    print(u.reshape(-1, 2))
+    u0 = Function(U) # zero by default
     
-    plot_truss(mesh, u, scale=10.0)
+    u = solve_nonlinear(mesh, U, dh, form, forces, bcs, uold = u0, tol = 1e-8)
+    
+    plot_truss(mesh, u.array, scale=10.0)
