@@ -134,14 +134,14 @@ class TrussLocalIntegrator:
         V = L0*A  # Volume
 
         # Internal force vector (2D)
-        f_int = V * stress * (Bmat.T @ b)
+        F_int = V * stress * (Bmat.T @ b)
         D_mat = dtang * np.outer(b,b) 
         D_geo = stress*(np.eye(2) - np.outer(b,b))/lmbda
 
         # Tangent stiffness matrix (4x4)
         K = V * Bmat.T@(D_mat + D_geo)@Bmat
         
-        return K, f_int
+        return K, F_int
     
     
 class DOFHandler:
