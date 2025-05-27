@@ -259,6 +259,42 @@ def solve_nonlinear(mesh, U, dh, form, forces, bcs, uold, tol=1e-13, max_iter=50
     return u
 
 
+def solve_nonlinear_lift(mesh, U, dh, form, forces, bcs, uold, ulift, tol=1e-13, max_iter=50, 
+                    omega = 1.0, log = True):
+    u = Function(U)
+    uold = Function(U)
+    u.array[:] = uold.array[:]
+    
+    utot = Function(U)
+    utotold = Function(U)
+    
+    ass = Assembler(mesh, dh)
+    
+    for k in range(max_iter):
+        utot.array[:] = u.array[:] + ulift.array[:]
+        utotold.array[:] = uold.array[:] + ulift.array[:]
+        
+        K, F_int = ass.assemble(form, utot, utotold)
+        b = omega*(forces - F_int) + K@u.array[:]
+        
+        for bc in bcs:
+            bc.apply(K,b)
+        
+        K = K.tocsr()
+        b = np.array(b).astype(np.float64)
+
+        uold.array[:] = u.array[:] 
+        u.array[:] = spla.spsolve(K, b)
+        norm_du = np.linalg.norm(u.array - uold.array)/np.linalg.norm(u.array)
+        # norm_res = np.linalg.norm(forces-F_int)        
+
+        if(log): print(f"Iter {k:2d}: increment = {norm_du:.3e}")
+        if norm_du < tol:
+            break
+        
+    return u
+
+
 
 
 # plotting
