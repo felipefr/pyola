@@ -230,7 +230,7 @@ def solve_linear(mesh, U, dh, form, forces, bcs):
 # ----------------------------------------
 # Newton-Raphson Solver
 # ----------------------------------------
-def solve_nonlinear(mesh, U, dh, form, forces, bcs, uold, tol=1e-13, max_iter=50):
+def solve_nonlinear(mesh, U, dh, form, forces, bcs, uold, tol=1e-13, max_iter=50, log = True):
     u = Function(U)
     u.array[:] = uold.array[:]
     
@@ -251,7 +251,7 @@ def solve_nonlinear(mesh, U, dh, form, forces, bcs, uold, tol=1e-13, max_iter=50
         norm_du = np.linalg.norm(u.array - uold.array)/np.linalg.norm(u.array)
         # norm_res = np.linalg.norm(forces-F_int)        
 
-        print(f"Iter {k:2d}: increment = {norm_du:.3e}")
+        if(log): print(f"Iter {k:2d}: increment = {norm_du:.3e}")
         if norm_du < tol:
             break
         
