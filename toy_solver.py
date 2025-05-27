@@ -230,7 +230,8 @@ def solve_linear(mesh, U, dh, form, forces, bcs):
 # ----------------------------------------
 # Newton-Raphson Solver
 # ----------------------------------------
-def solve_nonlinear(mesh, U, dh, form, forces, bcs, uold, tol=1e-13, max_iter=50, log = True):
+def solve_nonlinear(mesh, U, dh, form, forces, bcs, uold, tol=1e-13, max_iter=50, 
+                    omega = 1.0, log = True):
     u = Function(U)
     u.array[:] = uold.array[:]
     
@@ -238,7 +239,7 @@ def solve_nonlinear(mesh, U, dh, form, forces, bcs, uold, tol=1e-13, max_iter=50
     
     for k in range(max_iter):
         K, F_int = ass.assemble(form, u, uold)
-        b = forces - F_int + K@u.array[:]
+        b = omega*(forces - F_int) + K@u.array[:]
         
         for bc in bcs:
             bc.apply(K,b)
