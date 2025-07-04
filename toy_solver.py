@@ -114,7 +114,8 @@ class LinearEngStrainCableMaterial:
         dtang = self.E if strain > 0.0 else 0.0
         
         stress = stress + self.eta*(lmbda - lmbda_old)
-        dtang = dtang + lmbda_old
+        dtang = dtang + self.eta
+        
         return stress, dtang
 
     
